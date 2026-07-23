@@ -46,8 +46,18 @@ const MINNEAPOLIS_ROSTER = {
 };
 
 // St. Paul's dataset says "Updated 2023" and the current term runs
-// Jan 2024-Dec 2027 (also citywide, so one shared date for all 7 seats).
+// Jan 2024-Dec 2027 (also citywide, so one shared date for all 7 seats) —
+// confirmed against each member's own stpaul.gov/department/city-council/
+// ward-N bio page, which also confirms neither city's council race carries
+// a party label (Minnesota municipal elections are nonpartisan by charter,
+// so "Nonpartisan" below is the accurate value, not a placeholder).
 const ST_PAUL_TERM_START = "2024-01-01";
+// Ward 6 is the one exception found on those bio pages: Nelsie Yang has
+// served continuously since her original swearing-in, not just the term
+// that began with everyone else's in 2024.
+const ST_PAUL_OFFICE_SINCE_OVERRIDES = {
+  6: "2020-01-01",
+};
 
 async function fetchJson(url) {
   const res = await fetch(url, { headers: { "User-Agent": "mn-civic-map-etl/0.1" } });
@@ -96,7 +106,7 @@ async function fetchStPaulWards() {
         repPhotoUrl: props.imgpath ?? null,
         repEmail: props.email ?? null,
         repPhone: props.phone ?? null,
-        officeSince: ST_PAUL_TERM_START,
+        officeSince: ST_PAUL_OFFICE_SINCE_OVERRIDES[wardNum] ?? ST_PAUL_TERM_START,
       },
     };
   });
