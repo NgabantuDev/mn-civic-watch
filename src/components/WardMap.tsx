@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Feature, FeatureCollection, Geometry } from "geojson";
-import type { WardProperties } from "@/lib/types";
+import type { RepProperties } from "@/lib/types";
 import { getUpcomingHearings } from "@/lib/hearings";
+import { CITY_ACCENT, accentFor, accentSoftFor } from "@/lib/cityTheme";
 import WardModal from "./WardModal";
 
 // Matches the OpenFreeMap "Liberty" style used by the get-flocked project,
@@ -27,7 +28,6 @@ const CITY_PALETTES: Record<City, string[]> = {
   Minneapolis: ["#93C5FD", "#67E8F9", "#7DD3FC", "#A5B4FC", "#5EEAD4", "#7DD3C0", "#38BDF8", "#A78BFA", "#38DED0", "#60A5FA", "#2DD4BF", "#818CF8", "#22D3EE"],
   "St. Paul": ["#FDBA74", "#FCA5A5", "#FDE68A", "#FB923C", "#F87171", "#FACC15", "#FB7185"],
 };
-const CITY_SWATCH: Record<City, string> = { Minneapolis: "#38BDF8", "St. Paul": "#FB7185" };
 const WARD_OUTLINE_COLOR = "#44403c";
 
 function cityMatchExpression(city: City): unknown[] {
@@ -51,10 +51,18 @@ const WARD_FILL_COLOR_EXPRESSION = [
 
 const TWIN_CITIES_CENTER: [number, number] = [-93.185, 44.955];
 const DEFAULT_ZOOM = 10.4;
+// How far around a point marker (mayor pin) to pad when "zooming to" it —
+// there's no polygon to fitBounds to, so this fakes one.
+const POINT_ZOOM_PADDING_DEGREES = 0.01;
 
-interface SelectedWard {
-  properties: WardProperties;
+interface SelectedRep {
+  properties: RepProperties;
   pinned: boolean;
+}
+
+interface MayorMarker {
+  marker: maplibregl.Marker;
+  properties: RepProperties;
 }
 
 function boundsFromFeature(feature: Feature<Geometry>): maplibregl.LngLatBounds {
@@ -71,8 +79,50 @@ function boundsFromFeature(feature: Feature<Geometry>): maplibregl.LngLatBounds 
   return bounds;
 }
 
+function boundsAroundPoint(lng: number, lat: number): maplibregl.LngLatBounds {
+  return new maplibregl.LngLatBounds(
+    [lng - POINT_ZOOM_PADDING_DEGREES, lat - POINT_ZOOM_PADDING_DEGREES],
+    [lng + POINT_ZOOM_PADDING_DEGREES, lat + POINT_ZOOM_PADDING_DEGREES],
+  );
+}
+
 function isMobileViewport(): boolean {
   return window.innerWidth < 768;
+}
+
+// A circular headshot "pin" for a mayor at City Hall — plain DOM rather
+// than a symbol-layer icon, since clipping a photo to a circle with a
+// colored ring is trivial in CSS and painful to pre-bake into a sprite.
+function createMayorMarkerElement(rep: RepProperties): HTMLDivElement {
+  const accent = accentFor(rep.city);
+  const el = document.createElement("div");
+  el.setAttribute("role", "button");
+  el.setAttribute("aria-label", `${rep.city} Mayor ${rep.repName ?? ""}`);
+  el.style.cssText = `
+    width: 44px; height: 44px; border-radius: 9999px;
+    border: 3px solid ${accent}; box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+    background: ${accentSoftFor(rep.city)}; overflow: hidden; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.15s ease; background-size: cover; background-position: center;
+  `;
+  if (rep.repPhotoUrl) {
+    const img = document.createElement("img");
+    img.src = rep.repPhotoUrl;
+    img.alt = rep.repName ?? "Mayor photo";
+    img.style.cssText = "width: 100%; height: 100%; object-fit: cover;";
+    el.appendChild(img);
+  } else {
+    el.textContent = (rep.repName ?? "?").slice(0, 1).toUpperCase();
+    el.style.color = accent;
+    el.style.fontWeight = "700";
+  }
+  el.addEventListener("mouseenter", () => {
+    el.style.transform = "scale(1.08)";
+  });
+  el.addEventListener("mouseleave", () => {
+    el.style.transform = "scale(1)";
+  });
+  return el;
 }
 
 export default function WardMap() {
@@ -83,8 +133,9 @@ export default function WardMap() {
   // ward's true full geometry — see the comment on the click handler for
   // why queryRenderedFeatures's own geometry isn't good enough for that.
   const wardsDataRef = useRef<FeatureCollection | null>(null);
-  const [selected, setSelected] = useState<SelectedWard | null>(null);
-  const selectedRef = useRef<SelectedWard | null>(null);
+  const mayorMarkersRef = useRef<MayorMarker[]>([]);
+  const [selected, setSelected] = useState<SelectedRep | null>(null);
+  const selectedRef = useRef<SelectedRep | null>(null);
   const [visibleCities, setVisibleCities] = useState<Record<City, boolean>>({
     Minneapolis: true,
     "St. Paul": true,
@@ -99,12 +150,12 @@ export default function WardMap() {
     visibleCitiesRef.current = visibleCities;
   }, [visibleCities]);
 
-  const zoomToWardBounds = (bounds: maplibregl.LngLatBounds) => {
+  const zoomToBounds = (bounds: maplibregl.LngLatBounds) => {
     const map = mapRef.current;
     if (!map) return;
     // The modal sits bottom-left (a bottom sheet on mobile), so padding is
-    // reserved on that side — otherwise fitBounds centers the ward in the
-    // *full* viewport and the modal ends up covering it.
+    // reserved on that side — otherwise fitBounds centers the target in
+    // the *full* viewport and the modal ends up covering it.
     map.fitBounds(bounds, {
       padding: isMobileViewport() ? { top: 60, bottom: 260, left: 40, right: 40 } : { top: 80, bottom: 300, left: 420, right: 80 },
       duration: 600,
@@ -125,11 +176,15 @@ export default function WardMap() {
 
   const applyCityFilter = (cities: Record<City, boolean>) => {
     const map = mapRef.current;
-    if (!map) return;
-    const visible = CITIES.filter((c) => cities[c]);
-    const filter = ["in", ["get", "city"], ["literal", visible]] as unknown as maplibregl.FilterSpecification;
-    for (const layerId of [WARDS_FILL_LAYER_ID, WARDS_OUTLINE_LAYER_ID, WARDS_LABEL_LAYER_ID]) {
-      if (map.getLayer(layerId)) map.setFilter(layerId, filter);
+    if (map) {
+      const visible = CITIES.filter((c) => cities[c]);
+      const filter = ["in", ["get", "city"], ["literal", visible]] as unknown as maplibregl.FilterSpecification;
+      for (const layerId of [WARDS_FILL_LAYER_ID, WARDS_OUTLINE_LAYER_ID, WARDS_LABEL_LAYER_ID]) {
+        if (map.getLayer(layerId)) map.setFilter(layerId, filter);
+      }
+    }
+    for (const { marker, properties } of mayorMarkersRef.current) {
+      marker.getElement().style.display = cities[properties.city as City] ? "" : "none";
     }
   };
 
@@ -137,8 +192,8 @@ export default function WardMap() {
     setVisibleCities((prev) => {
       const next = { ...prev, [city]: !prev[city] };
       applyCityFilter(next);
-      // If the pinned/hovered ward belongs to a city that just got hidden,
-      // clear it rather than leave a modal open for an invisible ward.
+      // If the pinned/hovered rep belongs to a city that just got hidden,
+      // clear it rather than leave a modal open for something invisible.
       if (!next[city] && selectedRef.current?.properties.city === city) {
         deselect();
       }
@@ -175,10 +230,48 @@ export default function WardMap() {
       // container has its final size fixes that.
       setTimeout(() => map.resize(), 100);
 
-      const res = await fetch("/wards.geojson");
-      const data: FeatureCollection = await res.json();
+      // no-store: this is static JSON re-fetched every ward/mayoral
+      // election cycle (see scripts/fetch-wards.mjs, fetch-mayors.mjs) — a
+      // browser-cached copy from before a field got added, like a stale
+      // `committees`-less response, crashes the modal on a field the
+      // current component code expects to exist.
+      const [wardsRes, mayorsRes] = await Promise.all([
+        fetch("/wards.geojson", { cache: "no-store" }),
+        fetch("/mayors.geojson", { cache: "no-store" }),
+      ]);
+      const data: FeatureCollection = await wardsRes.json();
+      const mayorsData: FeatureCollection = await mayorsRes.json();
       wardsDataRef.current = data;
+
+      // Guards the whole "add sources/layers/markers" block as a unit —
+      // without it, a second 'load' firing would duplicate every mayor
+      // marker on top of itself (Marker instances aren't deduped the way
+      // map.addSource/addLayer already are below).
       if (map.getSource(WARDS_SOURCE_ID)) return;
+
+      for (const feature of mayorsData.features) {
+        if (feature.geometry.type !== "Point") continue;
+        const properties = feature.properties as RepProperties;
+        const [lng, lat] = feature.geometry.coordinates as [number, number];
+        const el = createMayorMarkerElement(properties);
+        const marker = new maplibregl.Marker({ element: el, anchor: "center" }).setLngLat([lng, lat]).addTo(map);
+
+        el.addEventListener("mouseenter", () => {
+          if (!isDesktopHover || selectedRef.current?.pinned) return;
+          setSelected({ properties, pinned: false });
+        });
+        el.addEventListener("mouseleave", () => {
+          if (!isDesktopHover || selectedRef.current?.pinned) return;
+          setSelected(null);
+        });
+        el.addEventListener("click", (e) => {
+          e.stopPropagation();
+          setSelected({ properties, pinned: true });
+          zoomToBounds(boundsAroundPoint(lng, lat));
+        });
+
+        mayorMarkersRef.current.push({ marker, properties });
+      }
 
       map.addSource(WARDS_SOURCE_ID, { type: "geojson", data });
 
@@ -249,7 +342,7 @@ export default function WardMap() {
       map.getCanvas().style.cursor = "pointer";
       const feature = e.features?.[0];
       if (!feature) return;
-      setSelected({ properties: feature.properties as WardProperties, pinned: false });
+      setSelected({ properties: feature.properties as RepProperties, pinned: false });
     });
 
     map.on("mouseleave", WARDS_FILL_LAYER_ID, () => {
@@ -270,7 +363,7 @@ export default function WardMap() {
         if (selectedRef.current?.pinned) deselect();
         return;
       }
-      const hitProps = hit.properties as WardProperties;
+      const hitProps = hit.properties as RepProperties;
       setSelected({ properties: hitProps, pinned: true });
 
       // queryRenderedFeatures returns geometry clipped to whichever
@@ -282,7 +375,7 @@ export default function WardMap() {
       const fullFeature = wardsDataRef.current?.features.find(
         (f) => f.properties?.city === hitProps.city && f.properties?.ward === hitProps.ward,
       );
-      zoomToWardBounds(boundsFromFeature((fullFeature ?? hit) as Feature<Geometry>));
+      zoomToBounds(boundsFromFeature((fullFeature ?? hit) as Feature<Geometry>));
     });
 
     const handleResize = () => map.resize();
@@ -290,15 +383,18 @@ export default function WardMap() {
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      for (const { marker } of mayorMarkersRef.current) marker.remove();
+      mayorMarkersRef.current = [];
       map.remove();
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const hearings = selected
-    ? getUpcomingHearings(selected.properties.city, selected.properties.ward)
-    : [];
+  const hearings =
+    selected && selected.properties.ward !== null
+      ? getUpcomingHearings(selected.properties.city, selected.properties.ward)
+      : [];
 
   return (
     <div className="relative w-full h-dvh overflow-hidden">
@@ -319,7 +415,7 @@ export default function WardMap() {
             />
             <span
               className="h-2.5 w-2.5 rounded-full shrink-0"
-              style={{ backgroundColor: CITY_SWATCH[city] }}
+              style={{ backgroundColor: CITY_ACCENT[city] }}
             />
             {city}
           </label>
@@ -327,7 +423,7 @@ export default function WardMap() {
       </div>
 
       {selected && (
-        <div className="absolute inset-x-3 bottom-3 z-10 flex justify-center pointer-events-none sm:inset-x-auto sm:justify-start sm:left-4 sm:bottom-4">
+        <div className="absolute inset-x-0 bottom-0 z-10 flex justify-center pointer-events-none pb-[env(safe-area-inset-bottom)] sm:inset-x-auto sm:justify-start sm:left-4 sm:bottom-4 sm:pb-0">
           <WardModal
             ward={selected.properties}
             hearings={hearings}

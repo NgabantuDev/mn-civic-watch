@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "data:wards": "node scripts/fetch-wards.mjs",
+    "data:mayors": "node scripts/fetch-mayors.mjs",
+    "data:all": "npm run data:wards && npm run data:mayors",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",
