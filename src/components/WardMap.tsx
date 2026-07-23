@@ -79,6 +79,10 @@ export default function WardMap() {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const defaultBoundsRef = useRef<maplibregl.LngLatBounds | null>(null);
+  // The untouched fetch result, kept around so a click can look up a
+  // ward's true full geometry — see the comment on the click handler for
+  // why queryRenderedFeatures's own geometry isn't good enough for that.
+  const wardsDataRef = useRef<FeatureCollection | null>(null);
   const [selected, setSelected] = useState<SelectedWard | null>(null);
   const selectedRef = useRef<SelectedWard | null>(null);
   const [visibleCities, setVisibleCities] = useState<Record<City, boolean>>({
@@ -98,8 +102,11 @@ export default function WardMap() {
   const zoomToWardBounds = (bounds: maplibregl.LngLatBounds) => {
     const map = mapRef.current;
     if (!map) return;
+    // The modal sits bottom-left (a bottom sheet on mobile), so padding is
+    // reserved on that side — otherwise fitBounds centers the ward in the
+    // *full* viewport and the modal ends up covering it.
     map.fitBounds(bounds, {
-      padding: isMobileViewport() ? { top: 60, bottom: 260, left: 40, right: 40 } : { top: 80, bottom: 80, left: 80, right: 420 },
+      padding: isMobileViewport() ? { top: 60, bottom: 260, left: 40, right: 40 } : { top: 80, bottom: 300, left: 420, right: 80 },
       duration: 600,
     });
   };
@@ -170,6 +177,7 @@ export default function WardMap() {
 
       const res = await fetch("/wards.geojson");
       const data: FeatureCollection = await res.json();
+      wardsDataRef.current = data;
       if (map.getSource(WARDS_SOURCE_ID)) return;
 
       map.addSource(WARDS_SOURCE_ID, { type: "geojson", data });
@@ -257,13 +265,24 @@ export default function WardMap() {
     // zoom back out instead of just doing nothing.
     map.on("click", (e: maplibregl.MapMouseEvent) => {
       const features = map.queryRenderedFeatures(e.point, { layers: [WARDS_FILL_LAYER_ID] });
-      const feature = features[0];
-      if (!feature) {
+      const hit = features[0];
+      if (!hit) {
         if (selectedRef.current?.pinned) deselect();
         return;
       }
-      setSelected({ properties: feature.properties as WardProperties, pinned: true });
-      zoomToWardBounds(boundsFromFeature(feature as Feature<Geometry>));
+      const hitProps = hit.properties as WardProperties;
+      setSelected({ properties: hitProps, pinned: true });
+
+      // queryRenderedFeatures returns geometry clipped to whichever
+      // internal tile the click landed in, not the ward's true full
+      // shape — fitBounds on that would center on the click point rather
+      // than the ward, especially for large wards near a tile edge. Look
+      // the same ward up in the untiled source data fetched at load time
+      // for its real geometry instead.
+      const fullFeature = wardsDataRef.current?.features.find(
+        (f) => f.properties?.city === hitProps.city && f.properties?.ward === hitProps.ward,
+      );
+      zoomToWardBounds(boundsFromFeature((fullFeature ?? hit) as Feature<Geometry>));
     });
 
     const handleResize = () => map.resize();
