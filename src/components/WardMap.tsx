@@ -93,36 +93,48 @@ function isMobileViewport(): boolean {
 // A circular headshot "pin" for a mayor at City Hall — plain DOM rather
 // than a symbol-layer icon, since clipping a photo to a circle with a
 // colored ring is trivial in CSS and painful to pre-bake into a sprite.
+//
+// Two nested elements, not one: maplibregl.Marker positions its element by
+// writing `transform: translate(...)` directly onto it on every render. The
+// hover "pop" effect also wants to set `transform: scale(...)` — on the
+// same element, that overwrites Marker's translate and the pin jumps to
+// the map's untransformed top-left corner. Scaling the inner element
+// instead leaves Marker's own transform on the outer one alone.
 function createMayorMarkerElement(rep: RepProperties): HTMLDivElement {
   const accent = accentFor(rep.city);
-  const el = document.createElement("div");
-  el.setAttribute("role", "button");
-  el.setAttribute("aria-label", `${rep.city} Mayor ${rep.repName ?? ""}`);
-  el.style.cssText = `
+  const outer = document.createElement("div");
+  outer.setAttribute("role", "button");
+  outer.setAttribute("aria-label", `${rep.city} Mayor ${rep.repName ?? ""}`);
+  outer.style.cssText = "cursor: pointer;";
+
+  const inner = document.createElement("div");
+  inner.style.cssText = `
     width: 44px; height: 44px; border-radius: 9999px;
     border: 3px solid ${accent}; box-shadow: 0 2px 8px rgba(0,0,0,0.35);
-    background: ${accentSoftFor(rep.city)}; overflow: hidden; cursor: pointer;
+    background: ${accentSoftFor(rep.city)}; overflow: hidden;
     display: flex; align-items: center; justify-content: center;
     transition: transform 0.15s ease; background-size: cover; background-position: center;
   `;
+  outer.appendChild(inner);
+
   if (rep.repPhotoUrl) {
     const img = document.createElement("img");
     img.src = rep.repPhotoUrl;
     img.alt = rep.repName ?? "Mayor photo";
     img.style.cssText = "width: 100%; height: 100%; object-fit: cover;";
-    el.appendChild(img);
+    inner.appendChild(img);
   } else {
-    el.textContent = (rep.repName ?? "?").slice(0, 1).toUpperCase();
-    el.style.color = accent;
-    el.style.fontWeight = "700";
+    inner.textContent = (rep.repName ?? "?").slice(0, 1).toUpperCase();
+    inner.style.color = accent;
+    inner.style.fontWeight = "700";
   }
-  el.addEventListener("mouseenter", () => {
-    el.style.transform = "scale(1.08)";
+  outer.addEventListener("mouseenter", () => {
+    inner.style.transform = "scale(1.08)";
   });
-  el.addEventListener("mouseleave", () => {
-    el.style.transform = "scale(1)";
+  outer.addEventListener("mouseleave", () => {
+    inner.style.transform = "scale(1)";
   });
-  return el;
+  return outer;
 }
 
 export default function WardMap() {
